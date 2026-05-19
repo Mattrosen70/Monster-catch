@@ -288,13 +288,17 @@ function resize() {
 resize();
 window.addEventListener('resize', () => { resize(); if (gameState === 'playing') initGame(false); });
 
-// ─── STATE ────────────────────────────────────────────────────────────────────
+// ─── STATE ──────────────────────────────────────────────────────────[...]
 let gameState = 'menu'; // menu | playing | dead | gameover
 let score = 0, highScore = 0, lives = 3, level = 1, bounceCount = 0;
 let paddle = {}, ball = {}, particles = [], stars = [], floatingTexts = [];
+let extraBall = null;
+let lastExtraBallSpawnTime = 0;
+const EXTRA_BALL_SPAWN_COOLDOWN = 240000; // 4 minutes in milliseconds
+const EXTRA_BALL_SPEED_THRESHOLD = 6; // Only spawn when ball speed is >= this
 let animId;
 
-// ─── STAR FIELD ──────────────────────────────────────────────────────────────
+// ─── STAR FIELD ─────────────────────────────────────────────────────────[...]
 function initStars() {
   stars = [];
   for (let i = 0; i < 60; i++) {
@@ -308,10 +312,11 @@ function initStars() {
   }
 }
 
-// ─── INIT GAME ────────────────────────────────────────────────────────────────
+// ─── INIT GAME ─────────────────────────────────────────────────────────[...]
 function initGame(fullReset = true) {
   if (fullReset) {
     score = 0; lives = 3; level = 1; bounceCount = 0;
+    lastExtraBallSpawnTime = 0;
     updateHUD();
   }
   const cw = canvas.width, ch = canvas.height;
@@ -323,6 +328,7 @@ function initGame(fullReset = true) {
     w: pw,
     h: 18,
     targetX: cw / 2,
+    targetY: ch - 60,
     speed: 0,
     frame: 0,
     frameTimer: 0,
@@ -344,12 +350,13 @@ function initGame(fullReset = true) {
     angry: false
   };
 
+  extraBall = null;
   particles = [];
   floatingTexts = [];
   initStars();
 }
 
-// ─── PARTICLE ────────────────────────────────────────────────────────────────
+// ─── PARTICLE ─────────────────────────────────────────────────────────[...]
 function spawnParticles(x, y, color, count = 12) {
   for (let i = 0; i < count; i++) {
     const angle = Math.random() * Math.PI * 2;
@@ -371,7 +378,7 @@ function spawnFloatingText(x, y, text, color) {
   floatingTexts.push({ x, y, text, color, life: 1, vy: -1.5 });
 }
 
-// ─── DRAWING ─────────────────────────────────────────────────────────────────
+// ─── DRAWING ──────────────────────────────────────────────────────────[...]
 const COLORS = {
   neonGreen: '#39ff14',
   neonPink: '#ff00ff',
@@ -612,6 +619,53 @@ function drawBall() {
   ctx.restore();
 }
 
+function drawExtraBall() {
+  if (!extraBall) return;
+
+  const { x, y, r, spin, pulse } = extraBall;
+
+  // Glow aura
+  ctx.shadowColor = COLORS.neonOrange;
+  ctx.shadowBlur = 20;
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(spin);
+
+  // Extra ball body - bright orange
+  const extraGrad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, 1, 0, 0, r);
+  extraGrad.addColorStop(0, '#ffff00');
+  extraGrad.addColorStop(0.6, '#ff6600');
+  extraGrad.addColorStop(1, '#cc3300');
+  ctx.fillStyle = extraGrad;
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Stars on extra ball
+  ctx.strokeStyle = '#ffff00';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    const inner = r * 0.6, outer = r * 0.9;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * inner, Math.sin(a) * inner);
+    ctx.lineTo(Math.cos(a) * outer, Math.sin(a) * outer);
+    ctx.stroke();
+  }
+
+  // Label text on ball
+  ctx.fillStyle = '#000000';
+  ctx.font = 'bold 6px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('EXTRA', 0, -3);
+  ctx.fillText('LIFE', 0, 4);
+
+  ctx.restore();
+}
+
 function drawParticles() {
   for (const p of particles) {
     ctx.globalAlpha = p.life;
@@ -645,12 +699,21 @@ function drawFloatingTexts() {
   ctx.textAlign = 'left';
 }
 
-// ─── UPDATE ───────────────────────────────────────────────────────────────────
+// ─── UPDATE ──────────────────────────────────────────────────────────[...]
 function updatePaddle() {
-  const cw = canvas.width;
-  // Smooth follow
+  const cw = canvas.width, ch = canvas.height;
+  
+  // Smooth follow for horizontal movement
   paddle.x += (paddle.targetX - paddle.x) * 0.18;
   paddle.x = Math.max(paddle.w / 2, Math.min(cw - paddle.w / 2, paddle.x));
+
+  // Smooth follow for vertical movement
+  paddle.y += (paddle.targetY - paddle.y) * 0.18;
+  
+  // Constrain paddle vertical position to bottom 1/4 of screen
+  const minY = ch * 0.75;
+  const maxY = ch - paddle.h;
+  paddle.y = Math.max(minY, Math.min(maxY, paddle.y));
 
   // Animate squish recovery
   paddle.squish += (1 - paddle.squish) * 0.15;
@@ -745,6 +808,91 @@ function updateBall() {
   return null;
 }
 
+function updateExtraBall() {
+  if (!extraBall) return;
+
+  const cw = canvas.width, ch = canvas.height;
+
+  // Fall
+  extraBall.y += extraBall.vy;
+  extraBall.vy += 0.15; // gravity
+  extraBall.spin += 0.1;
+  extraBall.pulse += 0.15;
+
+  // Bounce off walls
+  if (extraBall.x - extraBall.r < 0) {
+    extraBall.x = extraBall.r;
+    extraBall.vx = Math.abs(extraBall.vx) * 0.7;
+  }
+  if (extraBall.x + extraBall.r > cw) {
+    extraBall.x = cw - extraBall.r;
+    extraBall.vx = -Math.abs(extraBall.vx) * 0.7;
+  }
+
+  // Slow horizontal drift
+  extraBall.x += extraBall.vx * 0.3;
+  extraBall.vx *= 0.98;
+
+  // Paddle collision
+  const px = paddle.x, py = paddle.y;
+  const pw = paddle.w, ph = paddle.h;
+  if (
+    extraBall.y + extraBall.r > py - ph / 2 &&
+    extraBall.y + extraBall.r < py + ph * 0.8 &&
+    extraBall.x > px - pw / 2 - extraBall.r &&
+    extraBall.x < px + pw / 2 + extraBall.r &&
+    extraBall.vy > 0
+  ) {
+    // Caught! Award extra life
+    lives++;
+    updateHUD();
+    spawnParticles(extraBall.x, extraBall.y, COLORS.neonOrange, 30);
+    spawnFloatingText(extraBall.x, extraBall.y - 30, '+1 LIFE!', COLORS.neonOrange);
+    extraBall = null;
+    return;
+  }
+
+  // Extra ball falls off screen
+  if (extraBall.y - extraBall.r > ch + 20) {
+    extraBall = null;
+  }
+}
+
+function spawnExtraBall() {
+  const now = Date.now();
+  
+  // Check cooldown (4-5 minutes)
+  if (now - lastExtraBallSpawnTime < EXTRA_BALL_SPAWN_COOLDOWN) {
+    return;
+  }
+
+  // Only spawn when ball speed is high
+  const ballSpd = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
+  if (ballSpd < EXTRA_BALL_SPEED_THRESHOLD) {
+    return;
+  }
+
+  // 15% random chance to spawn
+  if (Math.random() > 0.15) {
+    return;
+  }
+
+  // Spawn extra ball at random horizontal position at top
+  const cw = canvas.width;
+  extraBall = {
+    x: Math.random() * (cw - 40) + 20,
+    y: 30,
+    r: 12,
+    vx: (Math.random() - 0.5) * 2,
+    vy: 1,
+    spin: 0,
+    pulse: 0
+  };
+
+  lastExtraBallSpawnTime = now;
+  spawnFloatingText(extraBall.x, 10, 'EXTRA LIFE!', COLORS.neonOrange);
+}
+
 function updateParticles() {
   for (const p of particles) {
     p.x += p.vx;
@@ -763,7 +911,7 @@ function updateFloatingTexts() {
   floatingTexts = floatingTexts.filter(f => f.life > 0);
 }
 
-// ─── HUD ──────────────────────────────────────────────────────────────────────
+// ─── HUD ───────────────────────────────────────────────────────────[...]
 function updateHUD() {
   document.getElementById('score-display').textContent = score;
   document.getElementById('high-display').textContent = highScore;
@@ -775,7 +923,7 @@ function updateHUD() {
   });
 }
 
-// ─── MAIN LOOP ────────────────────────────────────────────────────────────────
+// ─── MAIN LOOP ─────────────────────────────────────────────────────────[...]
 let flashTimer = 0;
 function gameLoop() {
   animId = requestAnimationFrame(gameLoop);
@@ -790,6 +938,12 @@ function gameLoop() {
   if (gameState === 'playing') {
     updatePaddle();
     const result = updateBall();
+
+    // Update extra ball
+    updateExtraBall();
+
+    // Attempt to spawn extra ball
+    spawnExtraBall();
 
     if (result === 'miss') {
       lives--;
@@ -812,11 +966,14 @@ function gameLoop() {
           trail: [], spin: 0, glowPulse: 0,
           angry: level >= 4
         };
+        // Clear extra ball on miss
+        extraBall = null;
       }
     }
 
     drawMonster(paddle.x, paddle.y, paddle.w, paddle.h, paddle.frameTimer, paddle.squish, paddle.squishV);
     drawBall();
+    drawExtraBall();
 
     // Danger zone indicator
     if (ball.y > ch * 0.75) {
@@ -826,7 +983,7 @@ function gameLoop() {
   }
 }
 
-// ─── OVERLAY ─────────────────────────────────────────────────────────────────
+// ─── OVERLAY ──────────────────────────────────────────────────────────[...]
 function showMenu() {
   const overlay = document.getElementById('overlay');
   const box = document.getElementById('start-box');
@@ -861,7 +1018,7 @@ function startGame() {
   updateHUD();
 }
 
-// ─── INPUT ────────────────────────────────────────────────────────────────────
+// ─── INPUT ──────────────────────────────────────────────────────────[...]
 // Mouse
 canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
@@ -891,9 +1048,11 @@ setInterval(() => {
   const speed = 14;
   if (keys['ArrowLeft'] || keys['a'] || keys['A']) paddle.targetX -= speed;
   if (keys['ArrowRight'] || keys['d'] || keys['D']) paddle.targetX += speed;
+  if (keys['ArrowUp'] || keys['w'] || keys['W']) paddle.targetY -= speed;
+  if (keys['ArrowDown'] || keys['s'] || keys['S']) paddle.targetY += speed;
 }, 16);
 
-// ─── BOOT ─────────────────────────────────────────────────────────────────────
+// ─── BOOT ───────────────────────────────────────────────────────────[...]
 initGame(true);
 showMenu();
 gameLoop();
